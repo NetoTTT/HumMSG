@@ -1,17 +1,22 @@
 const puppeteer = require('puppeteer');
 const express = require('express');
+const axios = require('axios');
 const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
 
 
 // Inicializar Firebase Admin SDK
 const serviceAccount = require('./cred/callbossdiscordbot-firebase-adminsdk-g4z86-1cdafa0f83.json');
 admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount), // Usando o arquivo de credenciais para autenticação
+    credential: admin.credential.cert(serviceAccount),
+    storageBucket: 'callbossdiscordbot.appspot.com' // Usando o arquivo de credenciais para autenticação
 });
 
 // Acessar a instância do Firestore
 const db = admin.firestore();
+const bucket = admin.storage().bucket();
 
 let browser;
 let page;
@@ -47,6 +52,7 @@ async function abrirNavegador() {
 // Inicializar servidor local
 const app = express();
 app.use(bodyParser.json());
+app.use(express.json());
 
 
 // Função para simular a digitação e envio da mensagem
@@ -152,6 +158,174 @@ app.post('/enviarFirestore', async (req, res) => {
         res.status(500).send('Erro ao acessar o Firestore.');
     }
 });
+
+// Função para obter a URL da imagem do Firebase Storage
+async function obterImagemFirebase(idImagem) {
+    try {
+        // Listando arquivos no diretório 'IMAGENS/' para depuração
+        const [files] = await bucket.getFiles({ prefix: 'IMAGENS/' });
+        const fileNames = files.map(file => file.name);
+
+        console.log('Arquivos encontrados no diretório IMAGENS:', fileNames); // Exibe os arquivos encontrados
+
+        // Adiciona a extensão do arquivo (.png) ao ID da imagem se necessário
+        const filePath = `IMAGENS/${idImagem}.png`; // Ajuste o formato conforme necessário
+        if (!fileNames.includes(filePath)) {
+            throw new Error('Imagem não encontrada no Firebase Storage');
+        }
+
+        // Acessa o arquivo diretamente no diretório 'IMAGENS'
+        const file = bucket.file(filePath);
+
+        const [exists] = await file.exists(); // Verifica se o arquivo existe
+
+        if (!exists) {
+            throw new Error('Imagem não encontrada no Firebase Storage');
+        }
+
+        // Obtém a URL de download assinada para a imagem
+        const [url] = await file.getSignedUrl({
+            action: 'read',
+            expires: '03-09-2491', // A URL expira em uma data muito distante
+        });
+
+        return url;
+    } catch (error) {
+        console.error('Erro ao obter imagem do Firebase Storage:', error.message);
+        throw error;
+    }
+}
+
+
+// Função para baixar a imagem
+async function baixarImagem(urlImagem) {
+    try {
+        // Extrai o nome do arquivo da URL sem os parâmetros adicionais
+        const nomeArquivo = path.basename(urlImagem.split('?')[0]);  // Remove a parte da query string
+        const caminhoArquivo = path.join(__dirname, 'imagens', nomeArquivo); // Caminho correto para salvar a imagem
+
+        // Verifica se o diretório 'imagens' existe, se não, cria-o
+        const dir = path.join(__dirname, 'imagens');
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir);  // Cria o diretório se ele não existir
+        }
+
+        const response = await axios({
+            url: urlImagem,
+            responseType: 'stream',
+        });
+
+        const writer = fs.createWriteStream(caminhoArquivo);
+
+        response.data.pipe(writer); // Faz o download da imagem
+
+        return new Promise((resolve, reject) => {
+            writer.on('finish', () => resolve(caminhoArquivo)); // Retorna o caminho do arquivo após a conclusão
+            writer.on('error', reject); // Lida com erros durante a escrita
+        });
+    } catch (error) {
+        console.error('Erro ao baixar imagem:', error.message);
+        throw error;
+    }
+}
+
+// Função para enviar a imagem via WhatsApp Web usando Puppeteer
+async function enviarImagemNoWhatsApp(imagemPath, mensagem, delay) {
+    try {
+        // Espera a caixa de mensagem aparecer
+        const textarea = await page.waitForSelector('p.selectable-text.copyable-text');
+        if (!textarea) throw new Error("Não há uma conversa aberta.");
+
+        // Foco no campo de texto
+        await textarea.focus();
+
+        // Simula a digitação de caracteres aleatórios durante o tempo de delay (como na função anterior)
+        const caracteresAleatorios = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?';
+        const tempoDeDelay = delay * 1000; // Convertendo o delay para milissegundos
+        const tempoPorCaractere = tempoDeDelay / 24; // Digitar até 24 caracteres durante o delay total
+        const tempoMaximoParaDigitar = Date.now() + tempoDeDelay; // Calculando o tempo limite para a digitação
+        const tempoRestanteParaMensagemReal = tempoDeDelay - 3000; // O tempo para começar a digitar a mensagem real (3 segundos antes do fim)
+
+        // Digitar caracteres aleatórios até o tempo se esgotar
+        while (Date.now() < tempoMaximoParaDigitar) {
+            const caractereAleatorio = caracteresAleatorios[Math.floor(Math.random() * caracteresAleatorios.length)];
+            await page.keyboard.type(caractereAleatorio, { delay: tempoPorCaractere });
+
+            // Verifica se chegou no tempo restante para digitar a mensagem real
+            if (Date.now() >= tempoRestanteParaMensagemReal) {
+                break; // Para de digitar caracteres aleatórios e começa a digitar a mensagem real
+            }
+        }
+
+        // Depois de digitar caracteres aleatórios, aguarda o restante do tempo até os 3 segundos
+        await new Promise(resolve => setTimeout(resolve, tempoRestanteParaMensagemReal - Date.now()));
+
+        const imagemBuffer = fs.readFileSync(imagemPath);
+
+        // Copiar a imagem para a área de transferência
+        clipboardy.write(imagemBuffer.toString('base64'));
+
+        // Agora vamos simular o envio da imagem, ao invés de digitar uma mensagem
+        const input = await page.$('input[type="file"]');
+        if (input) {
+            // Focar no input
+            await input.click({ clickCount: 3 }); // Tenta selecionar o campo
+            await page.keyboard.press('Control+A'); // Seleciona todo o conteúdo (se necessário)
+        
+            // Agora o conteúdo está na área de transferência
+            // Vamos simular o comando de colar
+            await page.keyboard.press('Control+V'); // Cola o arquivo (ou caminho) se permitido
+            console.log('Imagem copiada e colada no WhatsApp Web!');
+        }
+        
+        // Enviar a mensagem (aqui você pode alterar o texto da mensagem ou deixar em branco)
+        const tempoPorCaractereReal = 100; // Tempo entre os caracteres da mensagem real (em milissegundos)
+        // Verifique se a mensagem é válida
+        mensagem = mensagem || '';  // Se mensagem for undefined, usa uma string vazia
+
+        for (let i = 0; i < mensagem.length; i++) {
+            const caractereReal = mensagem.charAt(i);
+            await page.keyboard.type(caractereReal, { delay: tempoPorCaractereReal });
+        }
+
+
+        // Clicar no botão de enviar
+        const sendButton = await page.waitForSelector('[data-testid="send"], [data-icon="send"]');
+        if (sendButton) await sendButton.click();
+
+        console.log('Mensagem enviada com a imagem!');
+
+    } catch (error) {
+        console.error('Erro ao enviar imagem com a mensagem:', error.message);
+        throw error;
+    }
+}
+
+app.post('/enviarIMG', async (req, res) => {
+    const { id } = req.query;  // Só pegando o id, já que 'quantidade' não é necessário
+
+    // Verifica se o id foi passado
+    if (!id) {
+        return res.status(400).send('ID inválido.');
+    }
+
+    try {
+        // Passo 1: Obter URL da imagem do Firestore
+        const imagemUrl = await obterImagemFirebase(id);
+
+        // Passo 2: Baixar a imagem
+        const imagemPath = await baixarImagem(imagemUrl);
+
+        // Passo 3: Enviar a imagem via WhatsApp Web
+        await enviarImagemNoWhatsApp(imagemPath);
+
+        res.status(200).send('Imagem enviada com sucesso.');
+    } catch (error) {
+        console.error('Erro ao processar a requisição:', error.message);
+        res.status(500).send('Erro ao enviar imagem.');
+    }
+});
+
 
 
 // Iniciar o servidor e o navegador
