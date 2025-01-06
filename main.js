@@ -5,6 +5,10 @@ const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
+const cors = require('cors');
+const cheerio = require('cheerio');
+const { exec, spawn } = require('child_process');
+
 
 
 // Inicializar Firebase Admin SDK
@@ -54,6 +58,7 @@ const app = express();
 app.use(bodyParser.json());
 app.use(express.json());
 
+app.use(cors());
 
 // Função para simular a digitação e envio da mensagem
 async function simularDigitacaoEEnvio(page, mensagem, delay) {
@@ -115,11 +120,11 @@ async function simularDigitacaoEEnvio(page, mensagem, delay) {
 
 // Rota para enviar mensagem após buscar no Firestore
 app.post('/enviarFirestore', async (req, res) => {
-    const { id, quantidade } = req.query;
-    console.log("ID: ", id);
+    const { title, quantidade } = req.query;
+    console.log("ID: ", title);
     console.log("Quantidade: ", quantidade);
 
-    if (!id || quantidade <= 0) {
+    if (!title || quantidade <= 0) {
         return res.status(400).send('ID inválido ou quantidade inválida.');
     }
 
@@ -129,16 +134,16 @@ app.post('/enviarFirestore', async (req, res) => {
 
     try {
         // Pesquisar no Firestore pela coleção MSGTEXT
-        const snapshot = await db.collection('MSGTEXT').where('ID', '==', id).get();
+        const snapshot = await db.collection('MSGTEXT').where('Title', '==', title).get();
         if (snapshot.empty) {
             return res.status(404).send('Documento não encontrado.');
         }
 
         let mensagem = '';
-        let delay = 0; // Em segundos
+        let delay = 0; // Em segundos 
         snapshot.forEach(doc => {
-            mensagem = doc.data().msg; // Pega o campo msg do documento
-            delay = doc.data().delay || 0; // Pega o delay em segundos, se disponível
+            mensagem = doc.data().Description; // Pega o campo msg do documento
+            delay = doc.data().Delay || 0; // Pega o delay em segundos, se disponível
         });
 
         console.log("Mensagem: ", mensagem);
@@ -163,13 +168,13 @@ app.post('/enviarFirestore', async (req, res) => {
 async function obterImagemFirebase(idImagem) {
     try {
         // Listando arquivos no diretório 'IMAGENS/' para depuração
-        const [files] = await bucket.getFiles({ prefix: 'IMAGENS/' });
+        const [files] = await bucket.getFiles({ prefix: 'IMAGES/' });
         const fileNames = files.map(file => file.name);
 
-        console.log('Arquivos encontrados no diretório IMAGENS:', fileNames); // Exibe os arquivos encontrados
+        console.log('Arquivos encontrados no diretório IMAGES:', fileNames); // Exibe os arquivos encontrados
 
         // Adiciona a extensão do arquivo (.png) ao ID da imagem se necessário
-        const filePath = `IMAGENS/${idImagem}.png`; // Ajuste o formato conforme necessário
+        const filePath = `IMAGES/${idImagem}.png`; // Ajuste o formato conforme necessário
         if (!fileNames.includes(filePath)) {
             throw new Error('Imagem não encontrada no Firebase Storage');
         }
@@ -260,24 +265,7 @@ async function enviarImagemNoWhatsApp(imagemPath, mensagem, delay) {
         // Depois de digitar caracteres aleatórios, aguarda o restante do tempo até os 3 segundos
         await new Promise(resolve => setTimeout(resolve, tempoRestanteParaMensagemReal - Date.now()));
 
-        const imagemBuffer = fs.readFileSync(imagemPath);
 
-        // Copiar a imagem para a área de transferência
-        clipboardy.write(imagemBuffer.toString('base64'));
-
-        // Agora vamos simular o envio da imagem, ao invés de digitar uma mensagem
-        const input = await page.$('input[type="file"]');
-        if (input) {
-            // Focar no input
-            await input.click({ clickCount: 3 }); // Tenta selecionar o campo
-            await page.keyboard.press('Control+A'); // Seleciona todo o conteúdo (se necessário)
-        
-            // Agora o conteúdo está na área de transferência
-            // Vamos simular o comando de colar
-            await page.keyboard.press('Control+V'); // Cola o arquivo (ou caminho) se permitido
-            console.log('Imagem copiada e colada no WhatsApp Web!');
-        }
-        
         // Enviar a mensagem (aqui você pode alterar o texto da mensagem ou deixar em branco)
         const tempoPorCaractereReal = 100; // Tempo entre os caracteres da mensagem real (em milissegundos)
         // Verifique se a mensagem é válida
@@ -317,7 +305,7 @@ app.post('/enviarIMG', async (req, res) => {
         const imagemPath = await baixarImagem(imagemUrl);
 
         // Passo 3: Enviar a imagem via WhatsApp Web
-        await enviarImagemNoWhatsApp(imagemPath);
+        await enviarImagemNoWhatsApp(imagemPath, "", 1);
 
         res.status(200).send('Imagem enviada com sucesso.');
     } catch (error) {
@@ -326,7 +314,168 @@ app.post('/enviarIMG', async (req, res) => {
     }
 });
 
+// Configurar o servidor Express para servir o arquivo de áudio
+// Servir o arquivo de áudio via HTTP
+app.use('/audio', (req, res, next) => {
+    const audioFilePath = path.join(__dirname, 'tempAudio.mp3');
+    res.sendFile(audioFilePath, (err) => {
+        if (err) {
+            console.error('Erro ao servir o arquivo:', err);
+            next(err);
+        }
+    });
+});
 
+// Iniciar o servidor Express
+app.listen(3001, () => {
+    console.log('Servidor de áudio em execução na porta 3001');
+});
+
+app.post('/send-audio', async (req, res) => {
+    const title = req.query.title || req.body.title;
+
+    if (!title) {
+        return res.status(400).send('O título é obrigatório.');
+    }
+
+    try {
+        const msgAudioRef = db.collection('MSGAUDIO');
+        const snapshot = await msgAudioRef.where('Title', '==', title).get();
+
+        if (snapshot.empty) {
+            return res.status(404).send('Nenhum documento encontrado com o título especificado.');
+        }
+
+        let delay = 5;
+        snapshot.forEach(doc => {
+            delay = doc.data().Delay || delay;
+        });
+        delay = delay + 1;
+
+        console.log(`Delay obtido: ${delay}s`);
+
+        const audioPath = `AUDIOS/${title}.wav`;
+        const tempFilePath = path.join(__dirname, 'tempAudio.wav'); // Convertido para WAV
+        const file = bucket.file(audioPath);
+
+        await file.download({ destination: tempFilePath });
+        console.log(`Arquivo baixado para: ${tempFilePath}`);
+
+        const textAreaSelector = 'p.selectable-text.copyable-text';
+        await page.waitForSelector(textAreaSelector, { visible: true });
+        const textArea = await page.$(textAreaSelector);
+
+        const randomCharacters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        const endTime = Date.now() + 1000;
+
+        while (Date.now() < endTime - 100) {
+            const char = randomCharacters.charAt(Math.floor(Math.random() * randomCharacters.length));
+            await textArea.type(char);
+        }
+
+        const sendButtonSelector = '[data-testid="send"], [data-icon="send"]';
+        const sendButton = await page.waitForSelector(sendButtonSelector, { visible: true });
+        const sendButtonPosition = await sendButton.boundingBox();
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('A');
+        await page.keyboard.up('Control');
+        await page.keyboard.press('Backspace');
+
+        if (!sendButtonPosition) {
+            throw new Error('Não foi possível obter a posição do botão de enviar.');
+        }
+
+        console.log('Posição do botão de enviar salva:', sendButtonPosition);
+
+        const { x, y } = sendButtonPosition;
+
+        console.log('Simulando o início da gravação de áudio...');
+        await page.mouse.click(x + 5, y + 5);
+
+        console.log('Iniciando reprodução de áudio com FFmpeg...');
+        const ffmpegProcess = spawn('ffmpeg', [
+            '-f', 'wav',                     // Formato de entrada
+            '-i', tempFilePath,              // Caminho do arquivo WAV
+            '-f', 'dshow',                   // Use dshow para captura de áudio no Windows
+            '-i', 'audio="Microfone (DroidCam Virtual Audio)"', // Nome correto do dispositivo de áudio
+            'default'                        // Enviar para o dispositivo padrão de áudio
+        ]);
+
+        ffmpegProcess.stdout.on('data', (data) => {
+            console.log(`FFmpeg stdout: ${data}`);
+        });
+
+        ffmpegProcess.stderr.on('data', (data) => {
+            console.error(`FFmpeg stderr: ${data}`);
+        });
+
+        ffmpegProcess.on('close', async (code) => {
+            console.log(`Processo FFmpeg encerrado com código: ${code}`);
+
+            // Simular o clique para parar a gravação de áudio
+            console.log('Simulando o término da gravação de áudio...');
+            await page.mouse.click(x + 5, y + 5);
+
+            // Apagar o arquivo temporário
+            fs.unlinkSync(tempFilePath);
+            res.send('Áudio enviado com sucesso!');
+        });
+
+    } catch (error) {
+        console.error('Erro ao enviar o áudio:', error);
+        res.status(500).send('Erro ao enviar o áudio.');
+    }
+});
+
+
+// Função para listar dispositivos de áudio com SoX
+async function getSoXAudioDevices() {
+    return new Promise((resolve, reject) => {
+        const soxDevices = spawn('sox', ['--devices']);
+        let devicesOutput = '';
+        
+        soxDevices.stdout.on('data', (data) => {
+            devicesOutput += data.toString();
+        });
+
+        soxDevices.stderr.on('data', (data) => {
+            console.error(`SoX devices stderr: ${data}`);
+        });
+
+        soxDevices.on('close', () => {
+            const devices = parseSoXDevices(devicesOutput);
+            resolve(devices);
+        });
+
+        soxDevices.on('error', (err) => {
+            reject(err);
+        });
+    });
+}
+
+// Função para processar a saída de dispositivos SoX
+function parseSoXDevices(devicesOutput) {
+    const devices = [];
+    const lines = devicesOutput.split('\n');
+    let isDeviceSection = false;
+
+    lines.forEach(line => {
+        if (line.includes('Available devices')) {
+            isDeviceSection = true;
+            return;
+        }
+
+        if (isDeviceSection) {
+            if (line.trim() === '') return;
+            const parts = line.trim().split(/\s+/);
+            const name = parts.slice(1).join(' ');
+            devices.push({ index: parseInt(parts[0]), name });
+        }
+    });
+
+    return devices;
+}
 
 // Iniciar o servidor e o navegador
 app.listen(3000, async () => {

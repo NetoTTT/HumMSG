@@ -1,0 +1,96 @@
+app.post('/send-audio', async (req, res) => {
+    const title = req.query.title || req.body.title; // Título para busca no Firestore
+
+    if (!title) {
+        return res.status(400).send('O título é obrigatório.');
+    }
+
+    try {
+        
+        // Buscar o documento correspondente no Firestore
+        const msgAudioRef = db.collection('MSGAUDIO');
+        const snapshot = await msgAudioRef.where('Title', '==', title).get();
+
+        if (snapshot.empty) {
+            return res.status(404).send('Nenhum documento encontrado com o título especificado.');
+        }
+
+        let delay = 5000; // Valor padrão de espera
+        snapshot.forEach(doc => {
+            delay = doc.data().Delay || delay; // Usar o campo Delay do Firestore ou o valor padrão
+        });
+
+        console.log(`Delay obtido: ${delay}ms`);
+
+        // Caminho completo do arquivo no Firebase Storage
+        const audioPath = `AUDIOS/${title}`;
+        const tempFilePath = path.join(__dirname, 'tempAudio.mp3');
+        const file = bucket.file(audioPath);
+
+        // Baixar o arquivo do Firebase Storage
+        await file.download({ destination: tempFilePath });
+        console.log(`Arquivo baixado para: ${tempFilePath}`);
+
+        // Usar a URL local do arquivo para simular a entrada de áudio
+        const audioUrl = 'http://localhost:3001/audio'; // URL servida pelo Express
+
+        // Usar o Puppeteer para abrir a página
+
+        await page.goto(audioUrl, { waitUntil: 'networkidle0' }); // Garantir que o áudio seja carregado
+
+        // Escrever um espaço vazio no campo de texto
+        const textarea = await page.waitForSelector('p.selectable-text.copyable-text');
+        if (!textarea) throw new Error("Não há uma conversa aberta.");
+
+        // Foco no campo de texto
+        await textarea.focus();
+        await page.keyboard.type('a'); // Escreve uma letra qualquer (substitua por espaço se necessário)
+
+        // Salvar a posição do botão de enviar
+        const sendButtonSelector = '[data-testid="send"], [data-icon="send"]';
+        const sendButton = await page.waitForSelector(sendButtonSelector, { visible: true });
+        const sendButtonPosition = await sendButton.boundingBox();
+        
+        if (!sendButtonPosition) {
+            throw new Error('Não foi possível obter as coordenadas do botão de enviar');
+        }
+
+        console.log('Coordenadas do botão de enviar salvas:', sendButtonPosition);
+
+        // Apagar o conteúdo do campo de texto
+        await textArea.evaluate(el => el.innerText = ''); // Limpar o conteúdo do campo de texto
+
+        // Esperar o tempo de delay
+        delay = delay * 1000;
+        await page.waitForTimeout(delay);
+
+        // Clicar no botão de enviar usando as coordenadas salvas
+        if (sendButtonPosition) {
+            const { x, y } = sendButtonPosition;
+
+            // Primeiro clique no botão de envio
+            await page.mouse.click(x + 5, y + 5, { button: 'left', clickCount: 1 }); // Clique no botão de enviar
+            console.log('Primeiro clique no botão de enviar');
+
+            // Espera para simular o tempo de envio
+            await page.waitForTimeout(delay); // Espera pelo tempo do delay
+
+            // Segundo clique no mesmo local após o delay
+            await page.mouse.click(x + 5, y + 5, { button: 'left', clickCount: 1 }); // Clique novamente no botão de enviar
+            console.log('Segundo clique no botão de enviar');
+
+            console.log('Áudio enviado com sucesso!');
+        }
+
+        // Apagar o arquivo temporário
+        fs.unlinkSync(tempFilePath);
+
+        // Fechar o navegador do Puppeteer
+        await browser.close();
+
+        res.send('Áudio enviado com sucesso!');
+    } catch (error) {
+        console.error('Erro ao enviar o áudio:', error);
+        res.status(500).send('Erro ao enviar o áudio.');
+    }
+});

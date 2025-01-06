@@ -1,0 +1,55 @@
+import pyaudio
+import wave
+
+# Inicializando o PyAudio
+p = pyaudio.PyAudio()
+
+# Identificar o dispositivo de entrada (hummsg) com 2 canais
+input_device_index = 1  # Índice do dispositivo 'hummsg' (Virtual Audio Cable)
+
+# Verificando as propriedades do dispositivo selecionado
+device_info = p.get_device_info_by_index(input_device_index)
+print(f"Dispositivo selecionado: {device_info['name']}")
+print(f"Taxa de amostragem suportada: {device_info['defaultSampleRate']}")
+print(f"Canais suportados: {device_info['maxInputChannels']}")
+
+# Abrir o arquivo de áudio (substitua com o caminho para o seu arquivo .wav)
+file_path = "tempAudio.wav"
+wf = wave.open(file_path, 'rb')
+
+# Configurar o stream de entrada para capturar o áudio
+input_stream = p.open(format=pyaudio.paInt16,  # 16 bits por amostra
+                      channels=2,  # Usando 2 canais (estéreo)
+                      rate=wf.getframerate(),  # Taxa de amostragem do arquivo
+                      input=True,  # Indica que será uma entrada de áudio
+                      input_device_index=input_device_index,
+                      frames_per_buffer=1024)  # Definir o tamanho do buffer
+
+# Configurar o stream de saída padrão (sem definir explicitamente 'output' ou 'output_device_index')
+output_stream = p.open(format=pyaudio.paInt16,  # 16 bits por amostra
+                       channels=2,  # Usando 2 canais (estéreo)
+                       rate=wf.getframerate(),  # Taxa de amostragem do arquivo
+                       output=True,  # Indica que será uma saída de áudio
+                       frames_per_buffer=1024)  # Definir o tamanho do buffer
+
+# Reproduzir o arquivo de áudio
+print("Reproduzindo áudio...")
+data = wf.readframes(1024)
+
+while data:
+    output_stream.write(data)  # Enviar dados de áudio para o stream de saída
+    data = wf.readframes(1024)  # Ler o próximo bloco de áudio
+
+print("Áudio reproduzido com sucesso!")
+
+# Fechar os streams
+input_stream.stop_stream()
+input_stream.close()
+output_stream.stop_stream()
+output_stream.close()
+
+# Fechar o arquivo de áudio
+wf.close()
+
+# Finalizar o PyAudio
+p.terminate()
