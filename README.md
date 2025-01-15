@@ -1,1 +1,2 @@
 # HumMSG
+Automatizador de mensagens
